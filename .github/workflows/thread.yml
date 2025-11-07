@@ -1,0 +1,63 @@
+name: Daily Grok Thread
+on:
+  schedule:
+    - cron: '0 15 * * *'  # 8 AM Pacific every day
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch RSS
+        run: |
+          curl -s "${{ secrets.RSS_URL }}" > feed.xml
+          titles=$(xmlstarlet sel -t -v "//item/title" feed.xml | tail -5)
+          links=$(xmlstarlet sel -t -v "//item/link" feed.xml | tail -5)
+          echo "TITLES<<EOF" >> $GITHUB_ENV
+          echo "$titles" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "LINKS<<EOF" >> $GITHUB_ENV
+          echo "$links" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Call Grok
+        env:
+          XAI_KEY: ${{ secrets.XAI_KEY }}
+        run: |
+          prompt="You are Grok. Turn these 5 newest stories into a FUN 8-tweet thread for @NuxxusWebDesign.\nTweet 1: 🔥 hook\n2-7: 1 story + spicy take\n8: Follow for tomorrow!\nSources:\n"
+          i=1
+          while IFS= read -r t && IFS= read -r l <&3; do
+            prompt="$prompt• $t $l\n"
+            ((i++))
+          done <<< "$TITLES" 3<<< "$LINKS"
+          thread=$(curl -s https://api.x.ai/v1/chat/completions \
+            -H "Authorization: Bearer $XAI_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "grok-beta",
+              "messages": [{"role": "user", "content": "'"$prompt"'"}],
+              "temperature": 0.8
+            }' | jq -r '.choices[0].message.content')
+          echo "THREAD<<EOF" >> $GITHUB_ENV
+          echo "$thread" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Post Thread
+        env:
+          X_BEARER: ${{ secrets.X_BEARER }}
+          X_KEY: ${{ secrets.X_KEY }}
+          X_SECRET: ${{ secrets.X_SECRET }}
+          X_TOKEN: ${{ secrets.X_TOKEN }}
+        run: |
+          tweets=($(echo "$THREAD" | grep -oE '[0-9]/8 .*'))
+          first=$(curl -s -X POST https://api.twitter.com/2/tweets \
+            -H "Authorization: Bearer $X_BEARER" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\": \"${tweets[0]}\"}" | jq -r '.data.id')
+          for t in "${tweets[@]:1}"; do
+            last=$(curl -s -X POST https://api.twitter.com/2/tweets \
+              -H "Authorization: Bearer $X_BEARER" \
+              -H "Content-Type: application/json" \
+              -d "{\"text\": \"$t\", \"reply\": {\"in_reply_to_tweet_id\": \"$last\"}}" | jq -r '.data.id')
+          done
